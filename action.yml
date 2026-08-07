@@ -42,14 +42,15 @@ runs:
     - name: Install the toolchain stylus-check builds with
       uses: dtolnay/rust-toolchain@stable
 
-    # Keyed on the action's own commit, so a pinned version never rebuilds and
-    # a bumped version does.
+    # Keyed on the action's own ref, so a pinned version never rebuilds and a
+    # bumped one does. Not on a hash of the lockfile: hashFiles only resolves
+    # paths inside the workspace, and the action lives outside it.
     - name: Restore a previously built stylus-check
       id: cache
       uses: actions/cache@v4
       with:
         path: ${{ github.action_path }}/target/release/stylus-check
-        key: stylus-check-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}-${{ github.action_ref }}
+        key: stylus-check-${{ runner.os }}-${{ github.action_ref || github.sha }}
 
     - name: Build stylus-check
       if: steps.cache.outputs.cache-hit != 'true'
