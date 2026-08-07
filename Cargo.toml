@@ -10,7 +10,16 @@ homepage = "https://github.com/mariano-aguero/stylus-check"
 keywords = ["arbitrum", "stylus", "security", "linter", "static-analysis"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
-exclude = ["tests/fixtures/**"]
+# The published crate is the checker, not the repository around it. The
+# toolchain pin especially: it is how this project builds itself, and imposing
+# it on somebody who runs `cargo install` is not our business.
+exclude = [
+    "tests/fixtures/**",
+    ".github/**",
+    ".gitignore",
+    "action.yml",
+    "rust-toolchain.toml",
+]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
