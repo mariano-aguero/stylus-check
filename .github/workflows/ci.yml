@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release
+      # Two claims the README makes, checked rather than asserted: the rules stay
+      # quiet on an audited contract, and they say exactly what docs/baseline.md
+      # says they say on the SDK's own examples.
+      - name: Stay quiet on an audited contract
+        run: |
+          git clone --depth 1 https://github.com/mariano-aguero/agent-smart-account audited
+          ./target/release/stylus-check audited --fail-on low
+      - name: Report exactly the documented findings on the SDK examples
+        run: |
+          git clone --depth 1 https://github.com/OffchainLabs/stylus-sdk-rs sdk
+          count=$(./target/release/stylus-check sdk/examples --format json --fail-on low \
+            | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["findings"]))')
+          echo "baseline reports $count findings"
+          test "$count" -eq 12
