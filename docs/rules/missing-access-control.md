@@ -27,6 +27,18 @@ pub fn set_budget(&mut self, v: U256) -> Result<(), Vec<u8>> {
 }
 ```
 
+### Handing over the authority itself
+
+The worst version of this gets its own sentence, because it is the one nobody notices:
+
+```rust
+pub fn set_owner(&mut self, next: Address) {
+    self.owner.set(next);   // anyone can walk off with the contract
+}
+```
+
+*Writing* the owner is not *consulting* the owner. Treating those as the same thing is how a checker misses the only function that matters.
+
 ### When it stays quiet
 
-Reading the authority counts as consulting it, even without a visible comparison, because a function that loads the owner is doing it for a reason. Calls to anything named `only_*`, `require_*`, `assert_*` or `ensure_*` count too, as does any comparison against `msg_sender`. Read only functions are never reported.
+Reading the authority counts as consulting it, even without a visible comparison, because a function that loads the owner is doing it for a reason. Calls to anything named `only_*`, `require_*`, `assert_*` or `ensure_*` count too, as does any comparison against `msg_sender`. Read only functions are never reported, and neither is a `#[constructor]`: the SDK runs it once at deployment, so a guard there is a guard against a caller that cannot exist.

@@ -4,7 +4,8 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::{
-    entrypoints, mutates_self, position, public_impls, storage_write, touched_fields, Ctx, Rule,
+    entrypoints, has_attribute, mutates_self, position, public_impls, storage_write,
+    touched_fields, Ctx, Rule,
 };
 use crate::finding::{Finding, Severity};
 
@@ -48,6 +49,12 @@ impl Rule for MissingAccessControl {
                 if !mutates_self(function) {
                     continue;
                 }
+                // A constructor runs once, at deployment, and the SDK is what
+                // guarantees that. Asking it to check who called is asking for
+                // a guard against a caller that cannot exist.
+                if has_attribute(&function.attrs, "constructor") {
+                    continue;
+                }
                 let body = Body::of(&function.block, ctx);
                 if body.writes.is_empty() {
                     continue;
@@ -64,11 +71,27 @@ impl Rule for MissingAccessControl {
                     ctx.file,
                     line,
                     column,
-                    format!(
-                        "`{name}` writes {} but never reads {}",
-                        list(&body.writes),
-                        list(&authorities)
-                    ),
+                    if body.writes.iter().any(|w| authorities.contains(w)) {
+                        // Handing over the authority itself deserves its own
+                        // sentence, because it is the worst version of this.
+                        format!(
+                            "`{name}` hands over {} without checking who asked",
+                            list(
+                                &body
+                                    .writes
+                                    .iter()
+                                    .filter(|w| authorities.contains(w))
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            )
+                        )
+                    } else {
+                        format!(
+                            "`{name}` writes {} but never reads {}",
+                            list(&body.writes),
+                            list(&authorities)
+                        )
+                    },
                     "anyone can call this. Compare the caller against the authority the contract \
                      already declares, or say in a comment that it is meant to be open.",
                 ));
@@ -94,18 +117,43 @@ impl Body {
             ctx: &'a Ctx<'c>,
             body: Body,
         }
-        impl Visit<'_> for Seek<'_, '_> {
-            fn visit_expr(&mut self, expr: &syn::Expr) {
-                if let Some(field) = storage_write(expr, self.ctx.contract) {
-                    if !self.body.writes.contains(&field.name) {
-                        self.body.writes.push(field.name.clone());
-                    }
-                }
+        impl Seek<'_, '_> {
+            fn record_reads(&mut self, expr: &syn::Expr) {
                 for name in touched_fields(expr) {
                     if !self.body.reads.contains(&name) {
                         self.body.reads.push(name);
                     }
                 }
+            }
+        }
+
+        impl Visit<'_> for Seek<'_, '_> {
+            fn visit_expr(&mut self, expr: &syn::Expr) {
+                let written = storage_write(expr, self.ctx.contract).map(|f| f.name.clone());
+                if let Some(name) = &written {
+                    if !self.body.writes.contains(name) {
+                        self.body.writes.push(name.clone());
+                    }
+                }
+
+                // Writing a field is not consulting it. Counting it as a read
+                // meant `set_owner` looked like it checked the owner, so the one
+                // function where anyone can walk off with the contract was the
+                // one function never reported.
+                if let syn::Expr::MethodCall(call) = expr {
+                    if written.is_some() {
+                        // Only the arguments are reads. Walking the receiver
+                        // would arrive at `self.owner` and count the write as
+                        // one after all.
+                        for argument in &call.args {
+                            self.record_reads(argument);
+                            syn::visit::visit_expr(self, argument);
+                        }
+                        return;
+                    }
+                }
+
+                self.record_reads(expr);
                 syn::visit::visit_expr(self, expr);
             }
 
@@ -383,5 +431,108 @@ mod tests {
             ),
         );
         assert!(findings.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod authority_write_tests {
+    use super::*;
+    use crate::rules::{contract_of, parse};
+    use std::path::Path;
+
+    const OWNED: &str = r#"
+        sol_storage! {
+            #[entrypoint]
+            pub struct A { address owner; uint256 budget; }
+        }
+    "#;
+
+    fn run(source: &str) -> Vec<Finding> {
+        let file = parse(source);
+        let contract = contract_of(source);
+        let ctx = Ctx {
+            file: Path::new("contract.rs"),
+            contract: &contract,
+        };
+        MissingAccessControl.check(&file, &ctx)
+    }
+
+    /// The worst possible miss, and the rule had it: handing over ownership is
+    /// the function that most needs a guard, and writing `owner` was being
+    /// counted as consulting `owner`.
+    #[test]
+    fn giving_the_contract_away_is_not_the_same_as_checking_who_asked() {
+        let findings = run(&format!(
+            "{OWNED}
+             #[public]
+             impl A {{ pub fn set_owner(&mut self, next: Address) {{ self.owner.set(next); }} }}"
+        ));
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("set_owner"));
+    }
+
+    #[test]
+    fn a_guarded_handover_is_still_quiet() {
+        let findings = run(&format!(
+            "{OWNED}
+             #[public]
+             impl A {{
+                 pub fn set_owner(&mut self, next: Address) -> Result<(), Vec<u8>> {{
+                     if self.vm().msg_sender() != self.owner.get() {{ return Err(vec![]); }}
+                     self.owner.set(next);
+                     Ok(())
+                 }}
+             }}"
+        ));
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn reading_the_authority_inside_the_value_being_written_still_counts() {
+        let findings = run(&format!(
+            "{OWNED}
+             #[public]
+             impl A {{
+                 pub fn mirror(&mut self) {{ self.budget.set(self.owner.get().into()); }}
+             }}"
+        ));
+        assert!(
+            findings.is_empty(),
+            "the owner is genuinely consulted here, just in the argument"
+        );
+    }
+}
+
+#[cfg(test)]
+mod constructor_tests {
+    use super::*;
+    use crate::rules::{contract_of, parse};
+    use std::path::Path;
+
+    /// From the SDK's constructor example. It sets the owner and it has no
+    /// guard, and that is correct: the SDK runs it once, at deployment.
+    #[test]
+    fn a_constructor_needs_no_guard_against_a_caller_that_cannot_exist() {
+        let source = r#"
+            sol_storage! {
+                #[entrypoint]
+                pub struct A { address owner; uint256 number; }
+            }
+            #[public]
+            impl A {
+                #[constructor]
+                pub fn constructor(&mut self, initial: U256) {
+                    self.owner.set(self.vm().tx_origin());
+                    self.number.set(initial);
+                }
+            }
+        "#;
+        let file = parse(source);
+        let contract = contract_of(source);
+        let ctx = Ctx {
+            file: Path::new("contract.rs"),
+            contract: &contract,
+        };
+        assert!(MissingAccessControl.check(&file, &ctx).is_empty());
     }
 }

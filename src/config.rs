@@ -62,20 +62,45 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// Looks for `stylus-check.toml` at `start` and in every directory above it.
+///
+/// Stops at a repository boundary so a stray file in a home directory cannot
+/// quietly change what somebody's project reports.
+#[must_use]
+fn find_upward(start: &Path) -> Option<std::path::PathBuf> {
+    let mut current = if start.is_dir() {
+        Some(start)
+    } else {
+        start.parent()
+    };
+
+    while let Some(directory) = current {
+        let candidate = directory.join("stylus-check.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if directory.join(".git").exists() {
+            return None;
+        }
+        current = directory.parent();
+    }
+    None
+}
+
 impl Config {
-    /// Reads `stylus-check.toml` from a directory, if there is one.
+    /// Reads `stylus-check.toml`, searching upward from the path being checked.
+    ///
+    /// Upward, not just in place, because people point this at a subdirectory:
+    /// `stylus-check ./src` is the first example in the README, and the config
+    /// belongs at the project root above it. Looking only where the tool was
+    /// aimed meant the file was there, was valid, and did nothing.
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file exists but cannot be used.
     pub fn load(root: &Path, known_rules: &[&'static str]) -> Result<Self, ConfigError> {
-        let path = if root.is_dir() {
-            root.join("stylus-check.toml")
-        } else {
-            root.parent().unwrap_or(root).join("stylus-check.toml")
-        };
-        if !path.exists() {
+        let Some(path) = find_upward(root) else {
             return Ok(Self::default());
-        }
+        };
         let text =
             std::fs::read_to_string(&path).map_err(|e| ConfigError::Unreadable(e.to_string()))?;
         let config: Config =
@@ -168,5 +193,75 @@ mod tests {
     #[test]
     fn a_stray_key_is_refused_so_it_cannot_look_like_it_worked() {
         assert!(parse("disabled = [\"unwrap-in-entrypoint\"]").is_err());
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use std::fs;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("stylus-check-config-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        dir
+    }
+
+    /// `stylus-check ./src` is the README's own first example, and the config
+    /// belongs at the project root above it. Looking only where the tool was
+    /// aimed left the file sitting there doing nothing.
+    #[test]
+    fn a_config_at_the_project_root_applies_to_a_subdirectory() {
+        let dir = scratch("upward");
+        fs::write(
+            dir.join("stylus-check.toml"),
+            "disable = [\"unwrap-in-entrypoint\"]",
+        )
+        .unwrap();
+
+        let config = Config::load(&dir.join("src"), &["unwrap-in-entrypoint"]).unwrap();
+        assert!(config.is_disabled("unwrap-in-entrypoint"));
+    }
+
+    #[test]
+    fn it_is_found_from_a_single_file_too() {
+        let dir = scratch("file");
+        fs::write(
+            dir.join("stylus-check.toml"),
+            "disable = [\"unwrap-in-entrypoint\"]",
+        )
+        .unwrap();
+        let file = dir.join("src/lib.rs");
+        fs::write(&file, "").unwrap();
+
+        let config = Config::load(&file, &["unwrap-in-entrypoint"]).unwrap();
+        assert!(config.is_disabled("unwrap-in-entrypoint"));
+    }
+
+    #[test]
+    fn the_search_stops_at_the_repository_it_is_checking() {
+        let dir = scratch("boundary");
+        // A file above the repository must not reach into it.
+        fs::write(
+            dir.join("stylus-check.toml"),
+            "disable = [\"unwrap-in-entrypoint\"]",
+        )
+        .unwrap();
+        let repo = dir.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join("src")).unwrap();
+
+        let config = Config::load(&repo.join("src"), &["unwrap-in-entrypoint"]).unwrap();
+        assert!(!config.is_disabled("unwrap-in-entrypoint"));
+    }
+
+    #[test]
+    fn no_config_anywhere_is_not_an_error() {
+        let dir = scratch("none");
+        fs::create_dir_all(dir.join("repo/.git")).unwrap();
+        let config = Config::load(&dir.join("repo"), &["unwrap-in-entrypoint"]).unwrap();
+        assert!(!config.is_disabled("unwrap-in-entrypoint"));
     }
 }

@@ -16,6 +16,7 @@ Silence is only worth something if the rules would have spoken. Four defects wer
 | removed the owner check from `set_limits` | `missing-access-control` |
 | narrowed a `uint256` budget to `u64` | `lossy-integer-conversion` |
 | moved a storage write below the transfer | `state-write-after-call` |
+| removed the guard from an ownership handover | `missing-access-control` |
 
 ## The stylus-sdk examples, which should be honest
 
@@ -36,6 +37,8 @@ Each of these came from running against real code, not from thinking about it:
 - **Static calls are not interactions.** A `Call::new()` is a staticcall and cannot come back in, so a write after one is not out of order. Before this, reading a token balance and then recording a spend was reported as a reentrancy bug. Three false positives on the audited contract, all gone.
 - **A contract model belongs to one crate.** Building it across a whole tree merged the storage of every example into one imaginary contract, and functions were reported for not consulting an owner that belonged to somebody else's code.
 - **Panics only matter if a caller can cause one.** `I256::try_from(20_003_000).unwrap()` cannot fail at run time. Reporting it halved the signal and taught the reader to skim.
+- **Writing the authority is not reading it.** `set_owner` writes `owner`, and counting that as consulting `owner` made the rule silent on the single most dangerous function a contract can expose. Found by reviewing the rule against a contract written for the purpose, not by the baselines, which had no such function in them.
+- **A constructor has no caller to check.** The SDK runs it once at deployment. Requiring a guard there was a finding on the SDK's own `constructor` example.
 - **Documented fields are still fields.** `sol_storage!` arrives as an opaque token stream, and a documented field carries its doc comment as an attribute. Discarding attributes discarded the field with them, so every storage aware rule went quiet while still looking like it had run. This was the worst of the four, because it failed silently.
 
 ## Reproducing
