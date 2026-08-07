@@ -4,7 +4,7 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::{
-    entrypoints, has_attribute, mutates_self, position, public_impls, storage_write,
+    functions_in, has_attribute, mutates_self, position, public_impls, storage_write,
     touched_fields, Ctx, Rule,
 };
 use crate::finding::{Finding, Severity};
@@ -45,7 +45,7 @@ impl Rule for MissingAccessControl {
 
         let mut findings = Vec::new();
         for item in public_impls(file) {
-            for function in entrypoints(item) {
+            for function in functions_in(item) {
                 if !mutates_self(function) {
                     continue;
                 }
@@ -246,7 +246,7 @@ impl Rule for UnboundedStorageLoop {
     fn check(&self, file: &syn::File, ctx: &Ctx) -> Vec<Finding> {
         let mut findings = Vec::new();
         for item in public_impls(file) {
-            for function in entrypoints(item) {
+            for function in functions_in(item) {
                 let mut seek = Loops {
                     ctx,
                     findings: &mut findings,

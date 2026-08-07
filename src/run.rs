@@ -165,9 +165,12 @@ fn deprecated_guard_in_manifest(path: &Path, text: &str, config: &Config) -> Vec
         .enumerate()
         .filter(|(_, line)| {
             let trimmed = line.trim();
+            // The line has to name the SDK. Matching any line with a feature
+            // called `reentrant` reported unrelated crates that happen to have
+            // one, which is a finding about somebody else's dependency.
             !trimmed.starts_with('#')
                 && trimmed.contains("\"reentrant\"")
-                && (trimmed.contains("stylus-sdk") || trimmed.contains("features"))
+                && (trimmed.contains("stylus-sdk") || trimmed.contains("stylus_sdk"))
         })
         .map(|(index, _)| {
             Finding::new(
@@ -355,5 +358,35 @@ mod crate_scope_tests {
             !report.findings.iter().any(|f| f.rule == "missing-access-control"),
             "the open contract has no authority of its own, and the neighbour's is not its business"
         );
+    }
+}
+
+#[cfg(test)]
+mod manifest_rule_tests {
+    use super::*;
+
+    fn findings_for(manifest: &str) -> Vec<Finding> {
+        deprecated_guard_in_manifest(Path::new("Cargo.toml"), manifest, &Config::default())
+    }
+
+    #[test]
+    fn flags_the_feature_on_the_sdk() {
+        let found = findings_for("stylus-sdk = { version = \"0.10\", features = [\"reentrant\"] }");
+        assert_eq!(found.len(), 1);
+    }
+
+    /// A crate that happens to have a feature by the same name is not the SDK,
+    /// and a finding about somebody else's dependency is just noise.
+    #[test]
+    fn says_nothing_about_another_crate_with_a_feature_of_the_same_name() {
+        let found = findings_for("other-crate = { version = \"1\", features = [\"reentrant\"] }");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_commented_line_is_not_a_dependency() {
+        let found =
+            findings_for("# stylus-sdk = { version = \"0.10\", features = [\"reentrant\"] }");
+        assert!(found.is_empty());
     }
 }

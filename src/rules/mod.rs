@@ -111,9 +111,13 @@ impl<'ast> Visit<'ast> for Impls<'ast> {
     }
 }
 
-/// The functions a `#[public]` impl exposes.
+/// The functions an impl block defines, test helpers excluded.
+///
+/// Named for what it does rather than for where it is used: most rules pass a
+/// private impl to it, and calling the result an entrypoint there would be a
+/// lie in the one place a reader is trying to work out what is checked.
 #[must_use]
-pub fn entrypoints(item: &syn::ItemImpl) -> Vec<&syn::ImplItemFn> {
+pub fn functions_in(item: &syn::ItemImpl) -> Vec<&syn::ImplItemFn> {
     item.items
         .iter()
         .filter_map(|member| match member {
@@ -376,7 +380,7 @@ mod tests {
             1,
             "the impl behind cfg(test) is not the contract"
         );
-        let names: Vec<_> = entrypoints(impls[0])
+        let names: Vec<_> = functions_in(impls[0])
             .iter()
             .map(|f| f.sig.ident.to_string())
             .collect();
@@ -387,7 +391,7 @@ mod tests {
     fn knows_which_entrypoints_can_change_storage() {
         let file = parse(SOURCE);
         let impls = public_impls(&file);
-        let fns = entrypoints(impls[0]);
+        let fns = functions_in(impls[0]);
         assert!(mutates_self(fns[0]));
         assert!(!mutates_self(fns[1]));
     }

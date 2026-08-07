@@ -3,7 +3,7 @@
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use super::{contract_impls, entrypoints, position, Ctx, Rule};
+use super::{contract_impls, functions_in, position, Ctx, Rule};
 use crate::finding::{Finding, Severity};
 
 /// A panic reachable from a caller.
@@ -29,7 +29,7 @@ impl Rule for UnwrapInEntrypoint {
     fn check(&self, file: &syn::File, ctx: &Ctx) -> Vec<Finding> {
         let mut findings = Vec::new();
         for item in contract_impls(file) {
-            for function in entrypoints(item) {
+            for function in functions_in(item) {
                 let mut seek = Panics {
                     ctx,
                     findings: &mut findings,

@@ -3,7 +3,7 @@
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use super::{contract_impls, entrypoints, external_call, position, storage_write, Ctx, Rule};
+use super::{contract_impls, external_call, functions_in, position, storage_write, Ctx, Rule};
 use crate::finding::{Finding, Severity};
 
 /// A cross contract call whose answer nobody looked at.
@@ -26,7 +26,7 @@ impl Rule for UncheckedCallResult {
         let mut findings = Vec::new();
 
         for item in contract_impls(file) {
-            for function in entrypoints(item) {
+            for function in functions_in(item) {
                 let mut seek = DroppedResults {
                     ctx,
                     findings: &mut findings,
@@ -96,7 +96,7 @@ impl Rule for StateWriteAfterCall {
     fn check(&self, file: &syn::File, ctx: &Ctx) -> Vec<Finding> {
         let mut findings = Vec::new();
         for item in contract_impls(file) {
-            for function in entrypoints(item) {
+            for function in functions_in(item) {
                 let mut seek = Ordering {
                     ctx,
                     findings: &mut findings,
