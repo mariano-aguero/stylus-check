@@ -70,6 +70,28 @@ Exit `0` when nothing reached the threshold, `1` when something did, `2` when th
 
 A file that does not parse is named as skipped and the rest are still checked, because half a report during a refactor beats no report.
 
+## In a pull request
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  stylus-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mariano-aguero/stylus-check@main
+        with:
+          path: contracts
+          fail-on: high
+```
+
+Findings arrive as annotations on the changed lines, through code scanning, and the job goes red when anything reaches `fail-on`. Set `upload-sarif: false` on a repository without code scanning: the findings still print and still fail the job, they just do not annotate.
+
+The action exposes `findings` as an output, so a later step can read the count.
+
 ## Configuration
 
 `stylus-check.toml` in the project root:

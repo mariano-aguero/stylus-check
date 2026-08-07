@@ -44,3 +44,74 @@ jobs:
             | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["findings"]))')
           echo "baseline reports $count findings"
           test "$count" -eq 12
+
+  action:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out a real Stylus contract to point it at
+        uses: actions/checkout@v4
+        with:
+          repository: mariano-aguero/agent-smart-account
+          path: contracts
+
+      # The clean case: the action runs, writes SARIF, and passes.
+      - id: clean
+        uses: ./
+        with:
+          path: contracts
+          fail-on: low
+          upload-sarif: "false"
+
+      - name: The SARIF has to be valid and point at real files
+        run: |
+          test "${{ steps.clean.outputs.findings }}" -eq 0
+          python3 - <<'PY'
+          import json
+          doc = json.load(open("stylus-check.sarif"))
+          assert doc["version"] == "2.1.0", doc["version"]
+          driver = doc["runs"][0]["tool"]["driver"]
+          assert driver["name"] == "stylus-check"
+          assert len(driver["rules"]) == 7, driver["rules"]
+          print("sarif ok, 7 rules declared, 0 results")
+          PY
+
+      # The failing case. An action that cannot fail is decoration, so this
+      # introduces a defect and insists the job would have gone red.
+      - name: Introduce a defect the checker should catch
+        run: |
+          f=contracts/contracts/account/src/lib.rs
+          python3 - "$f" <<'PY'
+          import sys
+          path = sys.argv[1]
+          src = open(path).read()
+          anchor = "    pub fn set_limits(&mut self, budget: U256, tx_cap: U256) -> Result<(), Vec<u8>> {\n        self.only_owner()?;"
+          assert anchor in src, "anchor missing, the contract changed shape"
+          open(path, "w").write(src.replace(anchor, anchor.replace("\n        self.only_owner()?;", "")))
+          print("removed the owner check from set_limits")
+          PY
+
+      - id: dirty
+        uses: ./
+        continue-on-error: true
+        with:
+          path: contracts
+          fail-on: low
+          upload-sarif: "false"
+          sarif-file: dirty.sarif
+
+      - name: The action has to have failed, and said why
+        run: |
+          test "${{ steps.dirty.outcome }}" = "failure"
+          test "${{ steps.dirty.outputs.findings }}" -ge 1
+          python3 - <<'PY'
+          import json
+          results = json.load(open("dirty.sarif"))["runs"][0]["results"]
+          rules = {r["ruleId"] for r in results}
+          assert "missing-access-control" in rules, rules
+          uri = results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+          assert not uri.startswith("/"), f"a location has to be relative to the checkout, got {uri}"
+          assert uri.startswith("contracts/"), uri
+          print(f"failed as it should, on {sorted(rules)}, at {uri}")
+          PY

@@ -88,11 +88,30 @@ pub fn json(report: &Report) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(report)
 }
 
+/// Makes a path relative to `base`, which is what SARIF consumers need.
+///
+/// Code scanning resolves every location against the repository root. An
+/// absolute path from whichever machine ran the checker resolves to nothing, so
+/// the annotation lands nowhere and the run looks clean.
+#[must_use]
+pub fn relative_to(path: &std::path::Path, base: &std::path::Path) -> String {
+    let stripped = path.strip_prefix(base).unwrap_or(path);
+    let text = stripped.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("./").unwrap_or(&text).to_string()
+}
+
 /// SARIF 2.1.0, which is what code scanning ingests to annotate a pull request.
+///
+/// Locations are written relative to `base`, which should be the repository
+/// root, because that is what the annotations are resolved against.
 ///
 /// # Errors
 /// Returns an error only if the report cannot be serialised, which would be a bug.
-pub fn sarif(report: &Report, rules: &[(&str, &str)]) -> Result<String, serde_json::Error> {
+pub fn sarif(
+    report: &Report,
+    rules: &[(&str, &str)],
+    base: &std::path::Path,
+) -> Result<String, serde_json::Error> {
     #[derive(Serialize)]
     struct Sarif<'a> {
         #[serde(rename = "$schema")]
@@ -196,7 +215,7 @@ pub fn sarif(report: &Report, rules: &[(&str, &str)]) -> Result<String, serde_js
                     locations: vec![Location {
                         physical_location: Physical {
                             artifact_location: Artifact {
-                                uri: f.file.display().to_string(),
+                                uri: relative_to(&f.file, base),
                             },
                             region: Region {
                                 start_line: f.line,
@@ -271,6 +290,7 @@ mod tests {
         let out = sarif(
             &report(),
             &[("unwrap-in-entrypoint", "a panic reachable from a caller")],
+            Path::new(""),
         )
         .unwrap();
         let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -295,5 +315,60 @@ mod tests {
     fn a_format_is_only_one_of_the_three() {
         assert_eq!(Format::parse("SARIF"), Some(Format::Sarif));
         assert_eq!(Format::parse("xml"), None);
+    }
+}
+
+#[cfg(test)]
+mod sarif_location_tests {
+    use super::*;
+    use crate::finding::Finding;
+    use std::path::{Path, PathBuf};
+
+    fn report_at(file: &str) -> Report {
+        let mut report = Report::default();
+        report.findings.push(Finding::new(
+            "unwrap-in-entrypoint",
+            Severity::High,
+            Path::new(file),
+            3,
+            1,
+            "m",
+            "s",
+        ));
+        report
+    }
+
+    fn uri(report: &Report, base: &Path) -> String {
+        let out = sarif(report, &[("unwrap-in-entrypoint", "d")], base).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        doc["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Code scanning resolves locations against the repository root. An absolute
+    /// path from the machine that ran the checker resolves to nothing, and the
+    /// annotation lands nowhere while the run still looks like it worked.
+    #[test]
+    fn a_location_is_written_relative_to_the_checkout() {
+        let base = PathBuf::from("/home/runner/work/repo/repo");
+        let report = report_at("/home/runner/work/repo/repo/contracts/src/lib.rs");
+        assert_eq!(uri(&report, &base), "contracts/src/lib.rs");
+    }
+
+    #[test]
+    fn a_leading_dot_slash_is_not_part_of_the_path() {
+        let report = report_at("./src/lib.rs");
+        assert_eq!(uri(&report, Path::new("")), "src/lib.rs");
+    }
+
+    #[test]
+    fn a_path_outside_the_base_is_left_alone_rather_than_mangled() {
+        let report = report_at("/elsewhere/src/lib.rs");
+        assert_eq!(
+            uri(&report, Path::new("/home/runner/work")),
+            "/elsewhere/src/lib.rs"
+        );
     }
 }

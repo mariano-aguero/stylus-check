@@ -106,7 +106,12 @@ fn main() -> ExitCode {
     let rendered = match format {
         Format::Text => Ok(render::text(&report, threshold)),
         Format::Json => render::json(&report),
-        Format::Sarif => render::sarif(&report, &descriptions),
+        // Relative to where the checker was run, which in CI is the checkout
+        // root, so code scanning can resolve each location to a real file.
+        Format::Sarif => {
+            let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            render::sarif(&report, &descriptions, &base)
+        }
     };
     match rendered {
         Ok(text) => print!("{text}"),

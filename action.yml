@@ -1,0 +1,101 @@
+name: stylus-check
+description: Static security checks for Arbitrum Stylus contracts, annotated onto the pull request
+author: Mariano Aguero
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  path:
+    description: Directory or file to check, relative to the workspace.
+    required: false
+    default: "."
+  fail-on:
+    description: Lowest severity that fails the job. One of low, medium, high.
+    required: false
+    default: medium
+  upload-sarif:
+    description: >
+      Send the findings to code scanning, which annotates the pull request.
+      Needs `security-events: write` on the job. Turn it off on a repository
+      without code scanning, and the findings are still printed and still fail
+      the job.
+    required: false
+    default: "true"
+  sarif-file:
+    description: Where to write the SARIF, in case you want to keep it.
+    required: false
+    default: stylus-check.sarif
+
+outputs:
+  findings:
+    description: How many findings reached the threshold.
+    value: ${{ steps.check.outputs.findings }}
+  sarif-file:
+    description: Path to the SARIF that was written.
+    value: ${{ inputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the toolchain stylus-check builds with
+      uses: dtolnay/rust-toolchain@stable
+
+    # Keyed on the action's own commit, so a pinned version never rebuilds and
+    # a bumped version does.
+    - name: Restore a previously built stylus-check
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.action_path }}/target/release/stylus-check
+        key: stylus-check-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}-${{ github.action_ref }}
+
+    - name: Build stylus-check
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo build --locked --release --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+
+    - name: Check the contracts
+      id: check
+      shell: bash
+      run: |
+        set -o pipefail
+        checker="$GITHUB_ACTION_PATH/target/release/stylus-check"
+
+        # SARIF first, from the workspace root, so every location in it resolves
+        # against the checkout the way code scanning expects.
+        "$checker" "${{ inputs.path }}" --format sarif --fail-on "${{ inputs.fail-on }}" \
+          > "${{ inputs.sarif-file }}" || sarif_status=$?
+
+        if [ "${sarif_status:-0}" -eq 2 ]; then
+          echo "::error::stylus-check could not run. Its message:"
+          "$checker" "${{ inputs.path }}" --fail-on "${{ inputs.fail-on }}" || true
+          exit 2
+        fi
+
+        count=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['runs'][0]['results']))" "${{ inputs.sarif-file }}")
+        echo "findings=$count" >> "$GITHUB_OUTPUT"
+        echo "status=${sarif_status:-0}" >> "$GITHUB_OUTPUT"
+
+        # The readable version goes in the log, because a summary nobody has to
+        # click through is worth more than one they do.
+        "$checker" "${{ inputs.path }}" --fail-on "${{ inputs.fail-on }}" || true
+
+    # Uploaded before the job is allowed to fail, or a failing run would lose
+    # the annotations that explain why it failed.
+    - name: Annotate the pull request
+      if: inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: stylus-check
+
+    - name: Fail if anything reached the threshold
+      shell: bash
+      run: |
+        if [ "${{ steps.check.outputs.status }}" != "0" ]; then
+          echo "::error::${{ steps.check.outputs.findings }} finding(s) at or above ${{ inputs.fail-on }}"
+          exit 1
+        fi
+        echo "nothing at or above ${{ inputs.fail-on }}"
